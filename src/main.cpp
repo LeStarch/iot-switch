@@ -63,7 +63,11 @@ String process(String token)
             break;
         //Joing the local network
         case JOIN_AP:
-            command = "AT+CWJAP=\""+SSID+\",\""+PASSWORD+"\"";
+            command = "AT+CWJAP=\"";
+            command = command + SSID;
+            command = command + "\",\"";
+            command = command + PASSWORD;
+            command = command + "\"";
             next = IP_LIST;
             break;
         //List the IP for debugging purposes
