@@ -19,6 +19,8 @@ enum MachineState
     CIP_MUX,
     START_SERVER,
     ON_OFF,
+    RESPOND_SETUP,
+    RESPOND_CLOSE,
     MACH_NONE
 };
 /**
@@ -33,6 +35,7 @@ enum ProtocolState
     WAIT_READY,
     SETUP,
     WAIT_ACK,
-    WAIT_OK
+    WAIT_OK,
+    PAYLOAD
 };
 #endif /* SRC_MACHINE_H_ */

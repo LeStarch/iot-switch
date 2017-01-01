@@ -21,23 +21,41 @@
 /**
  * Process tokens received
  * @param token - string received from ESP
- * @return: command to send back to ESP or [NONE] or [RECALL]
  */
-String process(String token)
+void process(String token)
 {
     static MachineState MACH_STATE = MODE_SETUP;
     static ProtocolState PROTO_STATE = WAIT_READY;
-    String ret = "[NONE]";
+
+    static MachineState LAST_MACH_STATE = MODE_SETUP;
+    static ProtocolState LAST_PROTO_STATE = WAIT_READY;
+
+
+    static String user = "";
+    static String payload = "";
+
     String command = "";
     MachineState next = MODE_SETUP;
 
-    //Print states for debugging purposes
-    SerialTTY.print("Machine State: ");
+    //Nothing changed, don't do anything
+    if (token == "" && LAST_PROTO_STATE == PROTO_STATE && LAST_MACH_STATE == MACH_STATE)
+    {
+        return;
+    }
+    LAST_MACH_STATE = MACH_STATE;
+    LAST_PROTO_STATE = PROTO_STATE;
+    //Print out state information
+    SerialTTY.print("M");
     SerialTTY.print(MACH_STATE);
-    SerialTTY.print(" Protocol State: ");
+    SerialTTY.print(":P");
     SerialTTY.print(PROTO_STATE);
-    SerialTTY.print(" Token: ");
-    SerialTTY.println(token);
+    if (token != "")
+    {
+        SerialTTY.print(" Resp: '");
+        SerialTTY.print(token);
+        SerialTTY.print("'");
+    }
+    SerialTTY.println();
     //Error handling, flash 3 times and reset
     if (token == "ERROR")
     {
@@ -51,7 +69,8 @@ String process(String token)
         }
         MACH_STATE = MODE_SETUP;
         PROTO_STATE = WAIT_READY;
-        return "AT+RST";
+        SerialESP.print("AT+RST\r\n");
+        return;
     }
     //Machine state machine
     switch (MACH_STATE)
@@ -87,22 +106,48 @@ String process(String token)
             break;
         //State which loops handling clients sending ON/OFF
         case ON_OFF:
+            //Harvest user to respond to
+            if (token.startsWith("+IPD,"))
+            {
+                user = token.substring(5, token.indexOf(',', 5));
+            }
+            //Check for ON/OFF commands
             if (token.endsWith("ON"))
             {
                 digitalWrite(SWITCH,HIGH);
                 digitalWrite(LED,HIGH);
+                //Force protocol "OK" as ON/OFF don't emit "OK"
+                next = RESPOND_SETUP;
+                PROTO_STATE = WAIT_OK;
+                token = "OK";
             }
             else if (token.endsWith("OFF"))
             {
                 digitalWrite(SWITCH,LOW);
                 digitalWrite(LED,LOW);
+                //Force protocol "OK" as ON/OFF don't emit "OK"
+                next = RESPOND_SETUP;
+                PROTO_STATE = WAIT_OK;
+                token = "OK";
             }
-            command = "[NONE]";
+            break;
+        //Acks back to the requester
+        case RESPOND_SETUP:
+            payload = "HTTP/1.1 200 OK\r\n\r\nACK";
+            command = "AT+CIPSEND=";
+            command = command + user;
+            command = command + ",";
+            command = command + payload.length();
+            next = RESPOND_CLOSE;
+            break;
+        //Acks back to the requester
+        case RESPOND_CLOSE:
+            command = "AT+CIPCLOSE=";
+            command = command + user;
             next = ON_OFF;
             break;
         //Fail-safe state
         default:
-            command = "[NONE]";
             next = MACH_NONE;
     }
     //Protocol state machine
@@ -116,14 +161,38 @@ String process(String token)
             }
         //Setup sends the command out, and defers to the ESP for an ACK
         case SETUP:
-            ret = command;
+            if (command != "")
+            {
+                SerialTTY.print("      Cmd:  '");
+                SerialTTY.print(command);
+                SerialTTY.println("'");
+                SerialESP.print(command+"\r\n");
+            }
+            PROTO_STATE = WAIT_ACK;
+            if (payload != "")
+            {
+                PROTO_STATE = PAYLOAD;
+            }
+            break;
+        //Send the payload
+        case PAYLOAD:
+            delay(200);
+            if (payload != "")
+            {
+                SerialTTY.print("      Pay:  '");
+                SerialTTY.print(payload);
+                SerialTTY.println("'");
+                SerialESP.print(payload);
+                payload = "";
+            }
             PROTO_STATE = WAIT_ACK;
             break;
         //Wait for the ESP to ACK the command
         case WAIT_ACK:
-            SerialTTY.print("Waiting for: '");
+            payload = "";
+            SerialTTY.print("      Wait: '");
             SerialTTY.print(command);
-            SerialTTY.print("' but got '");
+            SerialTTY.print("' == '");
             SerialTTY.print(token);
             SerialTTY.println("'");
             if (token == command)
@@ -134,15 +203,14 @@ String process(String token)
         //Wait for an OK response, and then move to the next command
         //OK doesn't usually preceed more text, so a [RECALL] forces another run through the machine
         case WAIT_OK:
+            payload = "";
             if (token == "OK")
             {
                 PROTO_STATE = SETUP;
                 MACH_STATE = next;
-                ret = "[RECALL]";
             }
             break;
     }
-    return ret;
 }
 /**
  * Sets up the serial port for use as a serial server.
@@ -167,30 +235,24 @@ void setup()
  */
 void loop()
 {
-    //Read a complete response
-    String response = "";
-    String command = "[RECALL]";
-    while (response[response.length()-1] != '\n' || response[response.length()-2] != '\r')
-    {
-        response += SerialESP.readString();
-    }
     int from = 0;
     int index = 0;
+    //Read a complete response
+    static String response = "";
+    String command = "[RECALL]";
+    while (Serial1.available() > 0)
+    {
+        response = response + SerialESP.readString();
+    }
     //Loop through gotten responses
     while ((index = response.indexOf("\r\n",from)) != -1)
     {
         //Update loop variables for next token
-        String token = response.substring(from,(response[index-1] != '\r')?index:index-1);
+        String token = response.substring(from,(index >= 1 && response[index-1] != '\r')?index:index-1);
         from = index + 2;
         //Process this token running the state machine. A recall command output re-runs the state-machine (expected null response from ESP)
-        while ((command = process(token)) == "[RECALL]")
-        {}
-        //Send a command if it is valid
-        if (command != "[NONE]" && command != "")
-        {
-            SerialTTY.print("Command:  ");
-            SerialTTY.println(command);
-            SerialESP.print(command+"\r\n");
-        }
+        process(token);
     }
+    response = response.substring(from);
+    process("");
 }
